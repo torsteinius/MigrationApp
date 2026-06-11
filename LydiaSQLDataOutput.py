@@ -76,6 +76,13 @@ div[data-testid="stSidebar"] { background-color: #101827; }
     background: rgba(239, 68, 68, 0.10);
     color: #fee2e2;
 }
+
+.sql-file-date {
+    margin: -0.35rem 0 0.45rem 0;
+    color: rgba(255, 255, 255, 0.62);
+    font-size: 0.72rem;
+    line-height: 1.15;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -98,6 +105,15 @@ def find_sql_files(base: pathlib.Path):
     if not base.exists():
         return []
     return sorted(base.rglob("*.sql"))
+
+
+def sort_sql_files_by_date(files: list[pathlib.Path]) -> list[pathlib.Path]:
+    files_by_name = sorted(files, key=lambda path: rel_to_root(path).lower())
+    return sorted(
+        files_by_name,
+        key=lambda path: read_sql_file_date(str(path))["date"],
+        reverse=True,
+    )
 
 
 def sql_status(sql_text: str) -> dict:
@@ -780,7 +796,7 @@ def copy_button(label: str, text: str, key: str):
 # ---- Sidebar / trestruktur ----
 st.sidebar.title("SQL-filer")
 
-sql_files = find_sql_files(SQL_DIR)
+sql_files = sort_sql_files_by_date(find_sql_files(SQL_DIR))
 
 if not sql_files:
     st.warning(f"Fant ingen .sql-filer i: {SQL_DIR}")
@@ -828,7 +844,10 @@ for folder, files in groups.items():
             ):
                 selected_file = f
 
-            st.caption(date_label)
+            st.markdown(
+                f"<div class='sql-file-date'>{html.escape(date_label)}</div>",
+                unsafe_allow_html=True,
+            )
 
 if sql_files and "selected_sql_file" not in st.session_state:
     st.session_state.selected_sql_file = str(sql_files[0])
