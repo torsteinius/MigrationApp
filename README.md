@@ -1,6 +1,6 @@
 # Migreringsdata SQL
 
-Streamlit-app for aa kjoere, dokumentere og kvalitetssikre SQL-sporringer brukt i migreringsarbeid fra Kildesystemet/DWH.
+Streamlit-app for aa kjoere, dokumentere og kvalitetssikre SQL-sporringer brukt i migreringsarbeid fra lildesystemet/DWH.
 
 Appen lar deg velge SQL-filer fra `SQL/`, skrive egne sporringer, kjoere ett eller flere SQL-resultater, eksportere data til CSV/Excel og lagre datakvalitetsanalyse i `Resultater/` uten aa versjonere selve uttrekksdataene.
 
