@@ -78,6 +78,26 @@ DATABASE_TARGETS = {
         "owner": "IFSAPP",
     },
 }
+DATABASE_TREE_STYLE = {
+    "PFTSQL": {
+        "short_label": "PFTSQL staging",
+        "color": "blue",
+        "badge": "BLUE",
+        "emoji": "🟦",
+    },
+    "LYDIA": {
+        "short_label": "LYDIA SQL Server",
+        "color": "green",
+        "badge": "GREEN",
+        "emoji": "🟩",
+    },
+    "IFS_ORACLE": {
+        "short_label": "IFS Oracle",
+        "color": "orange",
+        "badge": "ORANGE",
+        "emoji": "🟧",
+    },
+}
 DEFAULT_DATABASE_KEY = "PFTSQL"
 
 DEFAULT_DATABASE_KEY = st.sidebar.selectbox(
@@ -934,54 +954,181 @@ def copy_button(label: str, text: str, key: str):
 def sql_file_display_title(path: pathlib.Path, fallback_database_key: str) -> str:
     status = read_sql_status(str(path))
     date_info = read_sql_file_date(str(path))
-    db_info = read_sql_database_info(str(path), fallback_database_key)
-    title = f"{path.name} · {db_info['key']} · {date_info['date']}"
+    title = f"📄 {path.name}  ({date_info['date']})"
 
     if status["outdated"]:
-        title = f"UTDATERT · {title}"
+        reason = status["reason"] or "utdatert"
+        title = f"🔴 UTDATERT · {path.name}  ({date_info['date']}) · {reason}"
 
     return title
 
 
-def sql_file_tree_leaf(path: pathlib.Path, fallback_database_key: str) -> dict:
-    db_info = read_sql_database_info(str(path), fallback_database_key)
+def database_tree_label(database_key: str, compact: bool = False) -> str:
+    database_key = normalize_database_key(database_key)
+    style = DATABASE_TREE_STYLE.get(database_key, {})
+    label = style.get("short_label") or DATABASE_TARGETS[database_key]["label"]
+    prefix = style.get("emoji") or style.get("badge") or database_key
+    return f"{prefix} {database_key}" if compact else f"{prefix} {label}"
+
+
+def sql_query_entries(path: pathlib.Path, fallback_database_key: str) -> list[dict]:
+    sql_text = read_sql_file(str(path))
+    file_database_key = sql_database_info(sql_text, fallback=fallback_database_key)["key"]
+    parts = split_multi_sql(sql_text)
     rel_path = path.relative_to(SQL_DIR).as_posix()
 
-    return {
-        "value": f"sql::{rel_path}",
-        "title": db_info["label"],
-    }
+    if not parts and sql_text.strip():
+        parts = [("SQL 1", sql_text.strip())]
+
+    entries = []
+    entries.append(
+        {
+            "rel_path": rel_path,
+            "query_index": None,
+            "query_title": "Hele filen",
+            "database_key": file_database_key,
+            "value": f"sql::{rel_path}::all",
+            "is_whole_file": True,
+        }
+    )
+
+    for index, (title, one_sql) in enumerate(parts, start=1):
+        query_database_key = sql_database_info(one_sql, fallback=file_database_key)["key"]
+        entries.append(
+            {
+                "rel_path": rel_path,
+                "query_index": index,
+                "query_title": title,
+                "database_key": query_database_key,
+                "value": f"sql::{rel_path}::query::{index}",
+                "is_whole_file": False,
+            }
+        )
+
+    return entries
+
+
+def query_tree_label(entry: dict) -> str:
+    if entry.get("is_whole_file"):
+        return "▶ Hele filen"
+    return f"🔎 {entry['query_title']}"
+
+
+def add_query_to_ant_tree(
+    roots: dict,
+    path: pathlib.Path,
+    entry: dict,
+    fallback_database_key: str,
+) -> None:
+    database_key = entry["database_key"]
+    current_level = roots
+    rel_parts = path.relative_to(SQL_DIR).parts
+    folder_prefix = []
+
+    for folder_part in rel_parts[:-1]:
+        folder_prefix.append(folder_part)
+        folder_key = "/".join(folder_prefix)
+        node = current_level.setdefault(
+            folder_part,
+            {
+                "value": f"folder::{folder_key}",
+                "title": folder_part,
+                "children": {},
+                "disabled": True,
+            },
+        )
+        current_level = node["children"]
+
+    database_node = current_level.setdefault(
+        database_key,
+        {
+            "value": f"database::{'/'.join(folder_prefix + [database_key])}",
+            "title": database_tree_label(database_key),
+            "children": {},
+            "disabled": True,
+        },
+    )
+    current_level = database_node["children"]
+
+    rel_path = entry["rel_path"]
+    file_node = current_level.setdefault(
+        rel_path,
+        {
+            "value": f"file::{database_key}::{rel_path}",
+            "title": sql_file_display_title(path, fallback_database_key),
+            "children": [],
+            "disabled": True,
+        },
+    )
+    file_node["children"].append(
+        {
+            "value": entry["value"],
+            "title": query_tree_label(entry),
+        }
+    )
+
+
+def add_query_to_arborist_tree(
+    roots: dict,
+    path: pathlib.Path,
+    entry: dict,
+    fallback_database_key: str,
+) -> None:
+    database_key = entry["database_key"]
+    current_level = roots
+    rel_parts = path.relative_to(SQL_DIR).parts
+    folder_prefix = []
+
+    for folder_part in rel_parts[:-1]:
+        folder_prefix.append(folder_part)
+        folder_key = "/".join(folder_prefix)
+        node = current_level.setdefault(
+            folder_part,
+            {
+                "id": f"folder::{folder_key}",
+                "name": folder_part,
+                "children": {},
+            },
+        )
+        current_level = node["children"]
+
+    database_node = current_level.setdefault(
+        database_key,
+        {
+            "id": f"database::{'/'.join(folder_prefix + [database_key])}",
+            "name": database_tree_label(database_key),
+            "children": {},
+        },
+    )
+    current_level = database_node["children"]
+
+    rel_path = entry["rel_path"]
+    file_node = current_level.setdefault(
+        rel_path,
+        {
+            "id": f"file::{database_key}::{rel_path}",
+            "name": sql_file_display_title(path, fallback_database_key),
+            "children": [],
+        },
+    )
+    file_node["children"].append(
+        {
+            "id": entry["value"],
+            "name": query_tree_label(entry),
+            "path": rel_path,
+            "query_index": entry["query_index"],
+            "query_title": entry["query_title"],
+            "database": database_key,
+        }
+    )
 
 
 def build_sql_tree(files: list[pathlib.Path], fallback_database_key: str) -> list[dict]:
     roots: dict[str, dict] = {}
 
     for path in files:
-        rel_parts = path.relative_to(SQL_DIR).parts
-        current_level = roots
-        folder_prefix = []
-
-        for folder_part in rel_parts[:-1]:
-            folder_prefix.append(folder_part)
-            folder_key = "/".join(folder_prefix)
-            node = current_level.setdefault(
-                folder_part,
-                {
-                    "value": f"folder::{folder_key}",
-                    "title": folder_part,
-                    "children": {},
-                    "disabled": True,
-                },
-            )
-            current_level = node["children"]
-
-        rel_path = path.relative_to(SQL_DIR).as_posix()
-        current_level[rel_path] = {
-            "value": f"file::{rel_path}",
-            "title": sql_file_display_title(path, fallback_database_key),
-            "children": [sql_file_tree_leaf(path, fallback_database_key)],
-            "disabled": True,
-        }
+        for entry in sql_query_entries(path, fallback_database_key):
+            add_query_to_ant_tree(roots, path, entry, fallback_database_key)
 
     def materialize(nodes: dict) -> list[dict]:
         out = []
@@ -999,37 +1146,8 @@ def build_sql_arborist_tree(files: list[pathlib.Path], fallback_database_key: st
     roots: dict[str, dict] = {}
 
     for path in files:
-        rel_parts = path.relative_to(SQL_DIR).parts
-        current_level = roots
-        folder_prefix = []
-
-        for folder_part in rel_parts[:-1]:
-            folder_prefix.append(folder_part)
-            folder_key = "/".join(folder_prefix)
-            node = current_level.setdefault(
-                folder_part,
-                {
-                    "id": f"folder::{folder_key}",
-                    "name": folder_part,
-                    "children": {},
-                },
-            )
-            current_level = node["children"]
-
-        rel_path = path.relative_to(SQL_DIR).as_posix()
-        db_info = read_sql_database_info(str(path), fallback_database_key)
-        current_level[rel_path] = {
-            "id": f"file::{rel_path}",
-            "name": sql_file_display_title(path, fallback_database_key),
-            "children": [
-                {
-                    "id": f"sql::{rel_path}",
-                    "name": db_info["label"],
-                    "path": rel_path,
-                    "database": db_info["key"],
-                }
-            ],
-        }
+        for entry in sql_query_entries(path, fallback_database_key):
+            add_query_to_arborist_tree(roots, path, entry, fallback_database_key)
 
     def materialize(nodes: dict) -> list[dict]:
         out = []
@@ -1047,7 +1165,8 @@ def selected_sql_value_to_path(value: str) -> pathlib.Path | None:
     if not value or not value.startswith("sql::"):
         return None
 
-    candidate = (SQL_DIR / value.removeprefix("sql::")).resolve()
+    rel_value = value.removeprefix("sql::").split("::query::", 1)[0].split("::all", 1)[0]
+    candidate = (SQL_DIR / rel_value).resolve()
 
     try:
         candidate.relative_to(SQL_DIR.resolve())
@@ -1055,6 +1174,19 @@ def selected_sql_value_to_path(value: str) -> pathlib.Path | None:
         return None
 
     return candidate if candidate.exists() else None
+
+
+def selected_sql_value_to_query(value: str) -> int | None:
+    if value and value.endswith("::all"):
+        return None
+
+    if not value or "::query::" not in value:
+        return None
+
+    try:
+        return int(value.rsplit("::query::", 1)[1])
+    except ValueError:
+        return None
 
 
 def selected_arborist_node_to_path(node: dict | None) -> pathlib.Path | None:
@@ -1068,15 +1200,33 @@ def selected_arborist_node_to_path(node: dict | None) -> pathlib.Path | None:
     return None
 
 
-def render_sql_tree_selector(files: list[pathlib.Path], fallback_database_key: str) -> pathlib.Path | None:
-    if not files:
+def selected_arborist_node_to_query(node: dict | None) -> int | None:
+    if not node:
         return None
+
+    query_index = node.get("query_index")
+    if query_index is None:
+        return selected_sql_value_to_query(node.get("id", ""))
+
+    try:
+        return int(query_index)
+    except (TypeError, ValueError):
+        return None
+
+
+def render_sql_tree_selector(files: list[pathlib.Path], fallback_database_key: str) -> tuple[pathlib.Path | None, int | None]:
+    if not files:
+        return None, None
 
     current_value = None
     if "selected_sql_file" in st.session_state:
         try:
             current_rel = pathlib.Path(st.session_state.selected_sql_file).resolve().relative_to(SQL_DIR.resolve())
-            current_value = f"sql::{current_rel.as_posix()}"
+            current_query_index = st.session_state.get("selected_query_index")
+            if current_query_index:
+                current_value = f"sql::{current_rel.as_posix()}::query::{current_query_index}"
+            else:
+                current_value = f"sql::{current_rel.as_posix()}::all"
         except ValueError:
             current_value = None
 
@@ -1094,9 +1244,9 @@ def render_sql_tree_selector(files: list[pathlib.Path], fallback_database_key: s
                 "closed": ":material/folder:",
                 "leaf": ":material/database:",
             },
-            row_height=28,
+            row_height=26,
             width="100%",
-            height=520,
+            height=460,
             indent=18,
             open_by_default=True,
             selection=current_value,
@@ -1104,7 +1254,10 @@ def render_sql_tree_selector(files: list[pathlib.Path], fallback_database_key: s
             search_term=search_term.strip() or None,
             key="sql_file_arborist_tree",
         )
-        return selected_arborist_node_to_path(selected_node)
+        return (
+            selected_arborist_node_to_path(selected_node),
+            selected_arborist_node_to_query(selected_node),
+        )
 
     if st_ant_tree is not None:
         st.caption("Tree-select aktiv: klikk feltet under for aa aapne mappestrukturen.")
@@ -1126,26 +1279,42 @@ def render_sql_tree_selector(files: list[pathlib.Path], fallback_database_key: s
         )
 
         if isinstance(selected_values, list) and selected_values:
-            return selected_sql_value_to_path(selected_values[-1])
+            return (
+                selected_sql_value_to_path(selected_values[-1]),
+                selected_sql_value_to_query(selected_values[-1]),
+            )
         if isinstance(selected_values, str):
-            return selected_sql_value_to_path(selected_values)
+            return (
+                selected_sql_value_to_path(selected_values),
+                selected_sql_value_to_query(selected_values),
+            )
 
-        return None
+        return None, None
 
-    options = [f"sql::{path.relative_to(SQL_DIR).as_posix()}" for path in files]
+    fallback_entries = [
+        entry
+        for path in files
+        for entry in sql_query_entries(path, fallback_database_key)
+    ]
+    options = [entry["value"] for entry in fallback_entries]
     selected_index = options.index(current_value) if current_value in options else 0
     selected_value = st.sidebar.selectbox(
         "Velg SQL",
         options=options,
         index=selected_index,
-        format_func=lambda value: sql_file_display_title(
-            selected_sql_value_to_path(value) or files[0],
-            fallback_database_key,
+        format_func=lambda value: next(
+            (
+                f"{database_tree_label(entry['database_key'], compact=True)} / "
+                f"{entry['rel_path']} / {entry['query_title']}"
+                for entry in fallback_entries
+                if entry["value"] == value
+            ),
+            value,
         ),
         help="Installer st-ant-tree for trestruktur med sok.",
         key="sql_file_tree_fallback",
     )
-    return selected_sql_value_to_path(selected_value)
+    return selected_sql_value_to_path(selected_value), selected_sql_value_to_query(selected_value)
 
 
 def package_status_rows() -> list[dict]:
@@ -1155,7 +1324,7 @@ def package_status_rows() -> list[dict]:
         ("plotly", "plotly", True, "Datakvalitetsgraf"),
         ("openpyxl", "openpyxl", True, "Excel-eksport"),
         ("streamlit_arborist", "streamlit-arborist", True, "Synlig trestruktur i sidepanelet"),
-        ("st_ant_tree", "st-ant-tree", True, "Trestruktur i sidepanelet"),
+        ("st_ant_tree", "st-ant-tree", False, "Dropdown-basert trefallback"),
         ("oracledb", "oracledb", False, "Oracle-driver"),
         ("cx_Oracle", "cx-Oracle", False, "Oracle-driver fallback"),
         ("pyodbc", "pyodbc", False, "SQL Server-driver"),
@@ -1336,7 +1505,7 @@ def render_python_environment_diagnostics() -> None:
 
 
 # ---- Sidebar / trestruktur ----
-with st.sidebar.expander("Python/miljo-test", expanded=(st_ant_tree is None)):
+with st.sidebar.expander("Python/miljo-test", expanded=(tree_view is None and st_ant_tree is None)):
     render_python_environment_diagnostics()
 
 st.sidebar.title("SQL-filer")
@@ -1348,12 +1517,14 @@ if not sql_files:
     sql_files = []
 
 with st.sidebar:
-    selected_file = render_sql_tree_selector(sql_files, DEFAULT_DATABASE_KEY)
+    selected_file, selected_query_index = render_sql_tree_selector(sql_files, DEFAULT_DATABASE_KEY)
 
-    if st_ant_tree is None:
+    if tree_view is None and st_ant_tree is not None:
+        st.caption("Bruker dropdown-basert tree-select. Installer `streamlit-arborist` for synlig tre.")
+    elif tree_view is None and st_ant_tree is None:
         st.caption(
-            "Tree-select mangler i Python-miljoet som kjorer appen. "
-            f"Kjor: `{sys.executable} -m pip install st-ant-tree`, og restart Streamlit."
+            "Tree-komponent mangler i Python-miljoet som kjorer appen. "
+            f"Kjor: `{sys.executable} -m pip install -r requirements.txt`, og restart Streamlit."
         )
 
 if sql_files and "selected_sql_file" not in st.session_state:
@@ -1361,13 +1532,52 @@ if sql_files and "selected_sql_file" not in st.session_state:
 
 if selected_file:
     st.session_state.selected_sql_file = str(selected_file)
+    st.session_state.selected_query_index = selected_query_index
     st.session_state.pop("result_df", None)
     st.session_state.pop("multi_results", None)
+elif "selected_sql_file" in st.session_state and "selected_query_index" not in st.session_state:
+    st.session_state.selected_query_index = None
 
 selected = None
 
 if "selected_sql_file" in st.session_state:
     selected = pathlib.Path(st.session_state.selected_sql_file)
+
+if selected is not None:
+    selected_db_info = read_sql_database_info(str(selected), DEFAULT_DATABASE_KEY)
+    selected_database_key = selected_db_info["key"]
+    selected_date_info = read_sql_file_date(str(selected))
+    selected_query_label = ""
+    selected_query_index = st.session_state.get("selected_query_index")
+    if selected_query_index:
+        selected_parts = split_multi_sql(read_sql_file(str(selected)))
+        if 1 <= int(selected_query_index) <= len(selected_parts):
+            selected_query_label, selected_query_sql = selected_parts[int(selected_query_index) - 1]
+            selected_database_key = sql_database_info(
+                selected_query_sql,
+                fallback=selected_database_key,
+            )["key"]
+    else:
+        selected_query_label = "Hele filen"
+    selected_query_html = (
+        f"<div style='margin-top:0.25rem;'>Spørring: {html.escape(selected_query_label)}</div>"
+        if selected_query_label
+        else ""
+    )
+    st.sidebar.markdown(
+        (
+            "<div style='margin-top:0.75rem;padding:0.65rem 0.75rem;"
+            "border-radius:0.55rem;background:rgba(255,255,255,0.72);"
+            "border:1px solid rgba(49,51,63,0.12);font-size:0.86rem;'>"
+            "<div style='font-weight:700;margin-bottom:0.25rem;'>Valgt SQL</div>"
+            f"<div>{html.escape(selected.relative_to(SQL_DIR).as_posix())}</div>"
+            f"{selected_query_html}"
+            f"<div style='margin-top:0.25rem;'>{html.escape(database_tree_label(selected_database_key))}</div>"
+            f"<div style='color:rgba(49,51,63,0.68);margin-top:0.25rem;'>Dato: {html.escape(selected_date_info['date'])}</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 # ---- Hovedflate ----
@@ -1676,7 +1886,18 @@ if run_clicked or run_all_clicked:
 
             base_name = "alle_sql_filer"
         else:
-            for title, one_sql in split_multi_sql(sql):
+            sql_parts_to_run = split_multi_sql(sql)
+            selected_query_index = st.session_state.get("selected_query_index")
+            if selected_query_index and mode == "Velg fra fil":
+                try:
+                    selected_query_index_int = int(selected_query_index)
+                except (TypeError, ValueError):
+                    selected_query_index_int = 0
+
+                if 1 <= selected_query_index_int <= len(sql_parts_to_run):
+                    sql_parts_to_run = [sql_parts_to_run[selected_query_index_int - 1]]
+
+            for title, one_sql in sql_parts_to_run:
                 item_database_key = sql_database_info(
                     one_sql,
                     fallback=current_database_key,
