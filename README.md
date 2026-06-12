@@ -51,12 +51,13 @@ pandas
 plotly
 openpyxl
 st-ant-tree
+streamlit-arborist
 ```
 
 Tree-select-komponenten installeres med:
 
 ```powershell
-python -m pip install st-ant-tree
+python -m pip install -r requirements.txt
 ```
 
 ## Starte appen
@@ -102,7 +103,7 @@ Det holder aa sette enten `ORACLE_DSN` eller kombinasjonen `ORACLE_HOST`, `ORACL
 
 ## Bruke SQL-filer
 
-Legg `.sql`-filer under `SQL/`. Appen finner filer rekursivt og viser dem i en trestruktur i venstre sidepanel.
+Legg `.sql`-filer under `SQL/`. Appen finner filer rekursivt og viser dem i en synlig trestruktur i venstre sidepanel.
 
 Trevelgeren er bygget slik:
 

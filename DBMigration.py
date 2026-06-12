@@ -8,6 +8,11 @@ import hashlib
 import subprocess
 import datetime
 import html
+import os
+import platform
+import getpass
+import importlib.util
+import importlib.metadata as importlib_metadata
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -18,8 +23,17 @@ st.set_page_config(page_title="DBMigration", layout="wide")
 
 try:
     from st_ant_tree import st_ant_tree
+    ST_ANT_TREE_IMPORT_ERROR = ""
 except ImportError:
     st_ant_tree = None
+    ST_ANT_TREE_IMPORT_ERROR = "ImportError"
+
+try:
+    from streamlit_arborist import tree_view
+    STREAMLIT_ARBORIST_IMPORT_ERROR = ""
+except ImportError:
+    tree_view = None
+    STREAMLIT_ARBORIST_IMPORT_ERROR = "ImportError"
 
 # ---- Finn repo-root med DivClasses ----
 THIS_FILE = pathlib.Path(__file__).resolve()
@@ -981,6 +995,54 @@ def build_sql_tree(files: list[pathlib.Path], fallback_database_key: str) -> lis
     return materialize(roots)
 
 
+def build_sql_arborist_tree(files: list[pathlib.Path], fallback_database_key: str) -> list[dict]:
+    roots: dict[str, dict] = {}
+
+    for path in files:
+        rel_parts = path.relative_to(SQL_DIR).parts
+        current_level = roots
+        folder_prefix = []
+
+        for folder_part in rel_parts[:-1]:
+            folder_prefix.append(folder_part)
+            folder_key = "/".join(folder_prefix)
+            node = current_level.setdefault(
+                folder_part,
+                {
+                    "id": f"folder::{folder_key}",
+                    "name": folder_part,
+                    "children": {},
+                },
+            )
+            current_level = node["children"]
+
+        rel_path = path.relative_to(SQL_DIR).as_posix()
+        db_info = read_sql_database_info(str(path), fallback_database_key)
+        current_level[rel_path] = {
+            "id": f"file::{rel_path}",
+            "name": sql_file_display_title(path, fallback_database_key),
+            "children": [
+                {
+                    "id": f"sql::{rel_path}",
+                    "name": db_info["label"],
+                    "path": rel_path,
+                    "database": db_info["key"],
+                }
+            ],
+        }
+
+    def materialize(nodes: dict) -> list[dict]:
+        out = []
+        for node in nodes.values():
+            children = node.get("children")
+            if isinstance(children, dict):
+                node = {**node, "children": materialize(children)}
+            out.append(node)
+        return out
+
+    return materialize(roots)
+
+
 def selected_sql_value_to_path(value: str) -> pathlib.Path | None:
     if not value or not value.startswith("sql::"):
         return None
@@ -995,6 +1057,17 @@ def selected_sql_value_to_path(value: str) -> pathlib.Path | None:
     return candidate if candidate.exists() else None
 
 
+def selected_arborist_node_to_path(node: dict | None) -> pathlib.Path | None:
+    if not node:
+        return None
+
+    value = node.get("id", "")
+    if value.startswith("sql::"):
+        return selected_sql_value_to_path(value)
+
+    return None
+
+
 def render_sql_tree_selector(files: list[pathlib.Path], fallback_database_key: str) -> pathlib.Path | None:
     if not files:
         return None
@@ -1007,15 +1080,44 @@ def render_sql_tree_selector(files: list[pathlib.Path], fallback_database_key: s
         except ValueError:
             current_value = None
 
+    if tree_view is not None:
+        search_term = st.text_input(
+            "Sok i SQL-tre",
+            value="",
+            placeholder="Filnavn, mappe eller database",
+            key="sql_file_tree_search",
+        )
+        selected_node = tree_view(
+            build_sql_arborist_tree(files, fallback_database_key),
+            icons={
+                "open": ":material/folder_open:",
+                "closed": ":material/folder:",
+                "leaf": ":material/database:",
+            },
+            row_height=28,
+            width="100%",
+            height=520,
+            indent=18,
+            open_by_default=True,
+            selection=current_value,
+            select_internal_nodes=False,
+            search_term=search_term.strip() or None,
+            key="sql_file_arborist_tree",
+        )
+        return selected_arborist_node_to_path(selected_node)
+
     if st_ant_tree is not None:
+        st.caption("Tree-select aktiv: klikk feltet under for aa aapne mappestrukturen.")
         selected_values = st_ant_tree(
             treeData=build_sql_tree(files, fallback_database_key),
-            defaultValue=[current_value] if current_value else [],
+            defaultValue=current_value if current_value else None,
             allowClear=False,
             multiple=False,
             treeCheckable=False,
             only_children_select=True,
             showSearch=True,
+            filterTreeNode=True,
+            treeDefaultExpandAll=True,
             treeLine=True,
             placeholder="Velg SQL",
             width_dropdown="100%",
@@ -1046,7 +1148,197 @@ def render_sql_tree_selector(files: list[pathlib.Path], fallback_database_key: s
     return selected_sql_value_to_path(selected_value)
 
 
+def package_status_rows() -> list[dict]:
+    packages = [
+        ("streamlit", "streamlit", True, "Kjerneapp"),
+        ("pandas", "pandas", True, "Dataframes og eksport"),
+        ("plotly", "plotly", True, "Datakvalitetsgraf"),
+        ("openpyxl", "openpyxl", True, "Excel-eksport"),
+        ("streamlit_arborist", "streamlit-arborist", True, "Synlig trestruktur i sidepanelet"),
+        ("st_ant_tree", "st-ant-tree", True, "Trestruktur i sidepanelet"),
+        ("oracledb", "oracledb", False, "Oracle-driver"),
+        ("cx_Oracle", "cx-Oracle", False, "Oracle-driver fallback"),
+        ("pyodbc", "pyodbc", False, "SQL Server-driver"),
+        ("pymssql", "pymssql", False, "SQL Server-driver fallback"),
+    ]
+
+    rows = []
+    for module_name, package_name, required, purpose in packages:
+        found = importlib.util.find_spec(module_name) is not None
+        version = ""
+
+        if found:
+            try:
+                version = importlib_metadata.version(package_name)
+            except importlib_metadata.PackageNotFoundError:
+                version = "installert"
+
+        rows.append(
+            {
+                "Status": "OK" if found else "Mangler",
+                "Modul": module_name,
+                "Pakke": package_name,
+                "Versjon": version,
+                "Paakrevd": "Ja" if required else "Ved behov",
+                "Brukes til": purpose,
+            }
+        )
+
+    return rows
+
+
+def build_environment_diagnostics_text(rows: list[dict]) -> str:
+    tree_module_spec = importlib.util.find_spec("st_ant_tree")
+    pip_show = subprocess.run(
+        [sys.executable, "-m", "pip", "show", "st-ant-tree"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    pip_freeze = subprocess.run(
+        [sys.executable, "-m", "pip", "freeze"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    lines = [
+        "# DBMigration Python/miljo-diagnostikk",
+        "",
+        "## Python",
+        f"Python: {sys.executable}",
+        f"Versjon: {platform.python_version()}",
+        f"Platform: {platform.platform()}",
+        f"Bruker: {getpass.getuser()}",
+        f"Arbeidsmappe: {os.getcwd()}",
+        f"Appfil: {THIS_FILE}",
+        f"Repo-root: {REPO_ROOT}",
+        "",
+        "## Tree-select",
+        f"streamlit_arborist importert: {tree_view is not None}",
+        f"streamlit_arborist importfeil: {STREAMLIT_ARBORIST_IMPORT_ERROR or '(ingen)'}",
+        f"st_ant_tree importert: {st_ant_tree is not None}",
+        f"st_ant_tree importfeil: {ST_ANT_TREE_IMPORT_ERROR or '(ingen)'}",
+        f"st_ant_tree module path: {tree_module_spec.origin if tree_module_spec else '(ikke funnet)'}",
+        "",
+        "## Pakker",
+    ]
+
+    for row in rows:
+        lines.append(
+            f"- {row['Modul']} / {row['Pakke']}: {row['Status']}"
+            f" {row['Versjon'] or ''} ({row['Paakrevd']}; {row['Brukes til']})"
+        )
+
+    lines += [
+        "",
+        "## pip show st-ant-tree",
+        (pip_show.stdout or pip_show.stderr or "(ingen output)").strip(),
+        "",
+        "## install-kommando for dette miljoet",
+        f'"{sys.executable}" -m pip install -r "{ROOT_DIR / "requirements.txt"}"',
+        "",
+        "## sys.path",
+        *sys.path,
+        "",
+        "## pip freeze",
+        (pip_freeze.stdout or pip_freeze.stderr or "(ingen output)").strip(),
+    ]
+
+    return "\n".join(str(line) for line in lines)
+
+
+def render_python_environment_diagnostics() -> None:
+    rows = package_status_rows()
+    diagnostics_text = build_environment_diagnostics_text(rows)
+    missing_required = [row["Pakke"] for row in rows if row["Status"] == "Mangler" and row["Paakrevd"] == "Ja"]
+    has_oracle_driver = any(row["Status"] == "OK" for row in rows if row["Modul"] in {"oracledb", "cx_Oracle"})
+    has_mssql_driver = any(row["Status"] == "OK" for row in rows if row["Modul"] in {"pyodbc", "pymssql"})
+
+    st.caption("Miljoet som faktisk kjorer Streamlit-appen.")
+    st.code(
+        "\n".join(
+            [
+                f"Python: {sys.executable}",
+                f"Versjon: {platform.python_version()}",
+                f"Bruker: {getpass.getuser()}",
+                f"Arbeidsmappe: {os.getcwd()}",
+                f"Appfil: {THIS_FILE}",
+                f"Repo-root: {REPO_ROOT}",
+            ]
+        ),
+        language="text",
+    )
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=300)
+
+    st.caption("Detaljer for tree-select-komponenten")
+    tree_module_spec = importlib.util.find_spec("st_ant_tree")
+    st.code(
+        "\n".join(
+            [
+                f"st_ant_tree importert: {st_ant_tree is not None}",
+                f"st_ant_tree importfeil: {ST_ANT_TREE_IMPORT_ERROR or '(ingen)'}",
+                f"st_ant_tree module path: {tree_module_spec.origin if tree_module_spec else '(ikke funnet)'}",
+            ]
+        ),
+        language="text",
+    )
+
+    pip_show = subprocess.run(
+        [sys.executable, "-m", "pip", "show", "st-ant-tree"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    st.caption("pip show st-ant-tree fra samme Python")
+    st.code(
+        (pip_show.stdout or pip_show.stderr or "(ingen output)").strip(),
+        language="text",
+    )
+
+    with st.expander("Python sys.path", expanded=False):
+        st.code("\n".join(sys.path), language="text")
+
+    with st.expander("Kopier komplett diagnostikk", expanded=True):
+        st.text_area(
+            "Diagnostikk til copy/paste",
+            value=diagnostics_text,
+            height=360,
+            key="python_environment_diagnostics_text",
+        )
+        copy_button(
+            "Kopier diagnostikk",
+            diagnostics_text,
+            "python_environment_diagnostics",
+        )
+
+    if missing_required:
+        st.warning("Mangler pakker som appen forventer.")
+        st.code(
+            f'"{sys.executable}" -m pip install -r "{ROOT_DIR / "requirements.txt"}"',
+            language="powershell",
+        )
+    else:
+        st.success("Paakrevde Python-pakker er tilgjengelige.")
+
+    if not has_oracle_driver:
+        st.info("Oracle krever `oracledb` eller `cx_Oracle` for aa kunne kjoere IFS-sporringer.")
+
+    if not has_mssql_driver:
+        st.info("SQL Server krever `pyodbc` eller `pymssql` for aa kunne kjoere PFTSQL/LYDIA-sporringer.")
+
+
 # ---- Sidebar / trestruktur ----
+with st.sidebar.expander("Python/miljo-test", expanded=(st_ant_tree is None)):
+    render_python_environment_diagnostics()
+
 st.sidebar.title("SQL-filer")
 
 sql_files = sort_sql_files_by_date(find_sql_files(SQL_DIR))
@@ -1059,7 +1351,10 @@ with st.sidebar:
     selected_file = render_sql_tree_selector(sql_files, DEFAULT_DATABASE_KEY)
 
     if st_ant_tree is None:
-        st.caption("Tips: installer `st-ant-tree` for sokbar trestruktur.")
+        st.caption(
+            "Tree-select mangler i Python-miljoet som kjorer appen. "
+            f"Kjor: `{sys.executable} -m pip install st-ant-tree`, og restart Streamlit."
+        )
 
 if sql_files and "selected_sql_file" not in st.session_state:
     st.session_state.selected_sql_file = str(sql_files[0])
