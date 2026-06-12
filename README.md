@@ -1,6 +1,10 @@
 # DBMigration
 
+<<<<<<< HEAD
 Streamlit-app for aa kjoere, dokumentere og kvalitetssikre SQL-sporringer brukt i databasemigrering og datakvalitetsarbeid.
+=======
+Streamlit-app for aa kjoere, dokumentere og kvalitetssikre SQL-sporringer brukt i migreringsarbeid fra lildesystemet/DWH.
+>>>>>>> ed2564e13a299e2d07614d8cd5f1739338ce7940
 
 Appen lar deg velge SQL-filer fra `SQL/`, skrive egne sporringer, kjoere ett eller flere SQL-resultater, eksportere data til CSV/Excel og lagre datakvalitetsanalyse i `Resultater/` uten aa versjonere selve uttrekksdataene.
 
