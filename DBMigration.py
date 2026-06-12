@@ -151,7 +151,7 @@ div[data-testid="stSidebar"] { background-color: #101827; }
 """, unsafe_allow_html=True)
 
 SQL_SEPARATOR_RE = re.compile(
-    r"^\s*--\s*===\s*(?P<kind>SQL_BASE|SQL-BASE|SQL_PREFIX|SQL-PREFIX|SQL_RESET|SQL-RESET|SQL)\s*:?\s*(?P<title>.*?)\s*===\s*$",
+    r"^\s*(?:--|[-\u2013\u2014]|\u00e2\u20ac[\u201c\u201d])\s*===\s*(?P<kind>SQL_BASE|SQL-BASE|SQL_PREFIX|SQL-PREFIX|SQL_RESET|SQL-RESET|SQL)\s*:?\s*(?P<title>.*?)\s*===\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 SQL_STATUS_RE = re.compile(
@@ -461,9 +461,23 @@ def database_label(database_key: str) -> str:
     return DATABASE_TARGETS[normalize_database_key(database_key)]["label"]
 
 
+def clean_sql_for_execution(sql: str) -> str:
+    clean = sql.strip()
+
+    while True:
+        next_clean = re.sub(r"\s*;\s*$", "", clean).strip()
+        next_clean = re.sub(r"\s*/\s*$", "", next_clean).strip()
+
+        if next_clean == clean:
+            return clean
+
+        clean = next_clean
+
+
 def run_sql(sql: str, database_key: str) -> pd.DataFrame:
     database_key = normalize_database_key(database_key)
     target = DATABASE_TARGETS[database_key]
+    sql = clean_sql_for_execution(sql)
 
     if target["kind"] == "mssql":
         with SqlServerBaseCls(prefix=target["prefix"]) as db:
@@ -1919,7 +1933,7 @@ if run_clicked or run_all_clicked:
         safe_run_items = []
 
         for item in run_items:
-            sql_to_run = item["sql"].strip()
+            sql_to_run = clean_sql_for_execution(item["sql"])
 
             if re.match(r"^\s*WITH\b", sql_to_run, flags=re.IGNORECASE) and not re.search(
                 r"\)\s*SELECT\b",
@@ -1929,7 +1943,7 @@ if run_clicked or run_all_clicked:
                 st.warning(f"Hopper over SQL_BASE uten SELECT: {item['title']}")
                 continue
 
-            safe_run_items.append(item)
+            safe_run_items.append({**item, "sql": sql_to_run})
 
         if not safe_run_items:
             st.warning("Ingen kjørbare SQL-resultater funnet. Fant bare SQL_BASE/prefix-blokker.")
