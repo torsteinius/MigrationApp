@@ -14,7 +14,12 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Migreringsdata SQL", layout="wide")
+st.set_page_config(page_title="DBMigration", layout="wide")
+
+try:
+    from st_ant_tree import st_ant_tree
+except ImportError:
+    st_ant_tree = None
 
 # ---- Finn repo-root med DivClasses ----
 THIS_FILE = pathlib.Path(__file__).resolve()
@@ -38,11 +43,36 @@ if REPO_ROOT is None:
 sys.path.insert(0, str(REPO_ROOT))
 
 from DivClasses.SQLServerBase import SqlServerBaseCls
+from DivClasses.OracleBase import OracleBaseCls
 
 
 # ---- Konfig ----
-USE_STAGING = st.sidebar.toggle("Bruk staging", value=True)
-DB_PREFIX = "PFTSQL_" if USE_STAGING else "LYDIA_"
+DATABASE_TARGETS = {
+    "PFTSQL": {
+        "label": "PFTSQL / staging (SQL Server)",
+        "kind": "mssql",
+        "prefix": "PFTSQL_",
+    },
+    "LYDIA": {
+        "label": "LYDIA (SQL Server)",
+        "kind": "mssql",
+        "prefix": "LYDIA_",
+    },
+    "IFS_ORACLE": {
+        "label": "IFS Oracle (IFSAPP)",
+        "kind": "oracle",
+        "owner": "IFSAPP",
+    },
+}
+DEFAULT_DATABASE_KEY = "PFTSQL"
+
+DEFAULT_DATABASE_KEY = st.sidebar.selectbox(
+    "Standard database",
+    options=list(DATABASE_TARGETS.keys()),
+    index=list(DATABASE_TARGETS.keys()).index(DEFAULT_DATABASE_KEY),
+    format_func=lambda key: DATABASE_TARGETS[key]["label"],
+    help="Brukes bare naar SQL-en ikke har -- DATABASE: ... i filen.",
+)
 
 st.markdown("""
 <style>
@@ -99,6 +129,10 @@ SQL_DATE_RE = re.compile(
     r"^\s*--\s*(?:DATO|DATE|SQL_DATO|SQL_DATE)\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+SQL_DATABASE_RE = re.compile(
+    r"^\s*--\s*(?:DATABASE|DB|DATASOURCE|DATA_SOURCE)\s*:\s*(?P<database>[A-Z0-9_ -]+)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def find_sql_files(base: pathlib.Path):
@@ -136,6 +170,71 @@ def sql_status(sql_text: str) -> dict:
 def sql_metadata_date(sql_text: str) -> str | None:
     match = SQL_DATE_RE.search(sql_text)
     return match.group("date") if match else None
+
+
+def normalize_database_key(database: str | None, fallback: str | None = None) -> str:
+    key = (database or "").strip().upper().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "STAGING": "PFTSQL",
+        "PFTSQL_": "PFTSQL",
+        "MSSQL_STAGING": "PFTSQL",
+        "SQLSERVER_STAGING": "PFTSQL",
+        "LYDIA_": "LYDIA",
+        "MSSQL_LYDIA": "LYDIA",
+        "SQLSERVER_LYDIA": "LYDIA",
+        "IFS": "IFS_ORACLE",
+        "IFSAPP": "IFS_ORACLE",
+        "ORACLE": "IFS_ORACLE",
+        "IFS_ORACLE": "IFS_ORACLE",
+    }
+    key = aliases.get(key, key)
+
+    if key in DATABASE_TARGETS:
+        return key
+
+    return fallback or DEFAULT_DATABASE_KEY
+
+
+def sql_metadata_database(sql_text: str) -> str | None:
+    matches = list(SQL_DATABASE_RE.finditer(sql_text))
+    if not matches:
+        return None
+    return normalize_database_key(matches[-1].group("database"))
+
+
+def sql_database_info(sql_text: str, fallback: str | None = None) -> dict:
+    match = SQL_DATABASE_RE.search(sql_text)
+    key = sql_metadata_database(sql_text) if match else normalize_database_key(fallback)
+
+    return {
+        "key": key,
+        "label": DATABASE_TARGETS[key]["label"],
+        "source": "SQL-kommentar" if match else "Standardvalg",
+    }
+
+
+def update_sql_database_marker(sql_text: str, database_key: str) -> str:
+    lines = sql_text.splitlines()
+    newline = "\n" if sql_text.endswith("\n") else ""
+    replacement = f"-- DATABASE: {normalize_database_key(database_key)}"
+    updated = []
+    replaced = False
+
+    for line in lines:
+        if SQL_DATABASE_RE.match(line):
+            if not replaced:
+                updated.append(replacement)
+                replaced = True
+            continue
+        updated.append(line)
+
+    if not replaced:
+        insert_at = 0
+        if updated and updated[0].startswith("\ufeff"):
+            updated[0] = updated[0].lstrip("\ufeff")
+        updated.insert(insert_at, replacement)
+
+    return "\n".join(updated) + newline
 
 
 def sql_file_date(path: pathlib.Path, sql_text: str | None = None) -> dict:
@@ -196,6 +295,14 @@ def read_sql_status(path_str: str) -> dict:
 def read_sql_file_date(path_str: str) -> dict:
     path = pathlib.Path(path_str)
     return sql_file_date(path, path.read_text(encoding="utf-8-sig"))
+
+
+@st.cache_data(show_spinner=False)
+def read_sql_database_info(path_str: str, fallback: str) -> dict:
+    return sql_database_info(
+        pathlib.Path(path_str).read_text(encoding="utf-8-sig"),
+        fallback=fallback,
+    )
 
 
 def rel_to_root(path: pathlib.Path) -> str:
@@ -316,9 +423,23 @@ def build_all_sql_source_text(sql_files: list[pathlib.Path], sql_dir: pathlib.Pa
     return "\n".join(chunks).strip()
 
 
-def run_sql(sql: str, db_prefix: str) -> pd.DataFrame:
-    with SqlServerBaseCls(prefix=db_prefix) as db:
-        return pd.read_sql(sql, db._conn)
+def database_label(database_key: str) -> str:
+    return DATABASE_TARGETS[normalize_database_key(database_key)]["label"]
+
+
+def run_sql(sql: str, database_key: str) -> pd.DataFrame:
+    database_key = normalize_database_key(database_key)
+    target = DATABASE_TARGETS[database_key]
+
+    if target["kind"] == "mssql":
+        with SqlServerBaseCls(prefix=target["prefix"]) as db:
+            return pd.read_sql(sql, db._conn)
+
+    if target["kind"] == "oracle":
+        with OracleBaseCls(owner_default=target.get("owner", "IFSAPP")) as db:
+            return pd.read_sql(sql, db._conn)
+
+    raise RuntimeError(f"Ukjent database-type: {target['kind']}")
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -453,7 +574,7 @@ def compare_manifest_results(previous: dict | None, current: dict) -> str:
     return "\n".join(lines).strip()
 
 
-def archive_result_analysis(results: list[dict], base_name: str, db_prefix: str) -> tuple[pathlib.Path, list[pathlib.Path], dict, str]:
+def archive_result_analysis(results: list[dict], base_name: str, default_database_key: str) -> tuple[pathlib.Path, list[pathlib.Path], dict, str]:
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_id = f"{safe_file_part(base_name)}_{timestamp}"
     run_dir = RESULTS_DIR / run_id
@@ -463,7 +584,8 @@ def archive_result_analysis(results: list[dict], base_name: str, db_prefix: str)
     manifest = {
         "run_id": run_id,
         "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
-        "db_prefix": db_prefix,
+        "default_database": default_database_key,
+        "default_database_label": database_label(default_database_key),
         "git_commit_before_archive": git_current_commit(),
         "base_name": base_name,
         "results": [],
@@ -494,6 +616,8 @@ def archive_result_analysis(results: list[dict], base_name: str, db_prefix: str)
             {
                 "title": title,
                 "source_file": result.get("source_file", ""),
+                "database": result.get("database_key", default_database_key),
+                "database_label": result.get("database_label", database_label(default_database_key)),
                 "sql_hash": content_hash(sql_text),
                 "quality_file": quality_path.name,
                 "columns_file": columns_path.name,
@@ -793,6 +917,135 @@ def copy_button(label: str, text: str, key: str):
     )
 
 
+def sql_file_display_title(path: pathlib.Path, fallback_database_key: str) -> str:
+    status = read_sql_status(str(path))
+    date_info = read_sql_file_date(str(path))
+    db_info = read_sql_database_info(str(path), fallback_database_key)
+    title = f"{path.name} · {db_info['key']} · {date_info['date']}"
+
+    if status["outdated"]:
+        title = f"UTDATERT · {title}"
+
+    return title
+
+
+def sql_file_tree_leaf(path: pathlib.Path, fallback_database_key: str) -> dict:
+    db_info = read_sql_database_info(str(path), fallback_database_key)
+    rel_path = path.relative_to(SQL_DIR).as_posix()
+
+    return {
+        "value": f"sql::{rel_path}",
+        "title": db_info["label"],
+    }
+
+
+def build_sql_tree(files: list[pathlib.Path], fallback_database_key: str) -> list[dict]:
+    roots: dict[str, dict] = {}
+
+    for path in files:
+        rel_parts = path.relative_to(SQL_DIR).parts
+        current_level = roots
+        folder_prefix = []
+
+        for folder_part in rel_parts[:-1]:
+            folder_prefix.append(folder_part)
+            folder_key = "/".join(folder_prefix)
+            node = current_level.setdefault(
+                folder_part,
+                {
+                    "value": f"folder::{folder_key}",
+                    "title": folder_part,
+                    "children": {},
+                    "disabled": True,
+                },
+            )
+            current_level = node["children"]
+
+        rel_path = path.relative_to(SQL_DIR).as_posix()
+        current_level[rel_path] = {
+            "value": f"file::{rel_path}",
+            "title": sql_file_display_title(path, fallback_database_key),
+            "children": [sql_file_tree_leaf(path, fallback_database_key)],
+            "disabled": True,
+        }
+
+    def materialize(nodes: dict) -> list[dict]:
+        out = []
+        for node in nodes.values():
+            children = node.get("children")
+            if isinstance(children, dict):
+                node = {**node, "children": materialize(children)}
+            out.append(node)
+        return out
+
+    return materialize(roots)
+
+
+def selected_sql_value_to_path(value: str) -> pathlib.Path | None:
+    if not value or not value.startswith("sql::"):
+        return None
+
+    candidate = (SQL_DIR / value.removeprefix("sql::")).resolve()
+
+    try:
+        candidate.relative_to(SQL_DIR.resolve())
+    except ValueError:
+        return None
+
+    return candidate if candidate.exists() else None
+
+
+def render_sql_tree_selector(files: list[pathlib.Path], fallback_database_key: str) -> pathlib.Path | None:
+    if not files:
+        return None
+
+    current_value = None
+    if "selected_sql_file" in st.session_state:
+        try:
+            current_rel = pathlib.Path(st.session_state.selected_sql_file).resolve().relative_to(SQL_DIR.resolve())
+            current_value = f"sql::{current_rel.as_posix()}"
+        except ValueError:
+            current_value = None
+
+    if st_ant_tree is not None:
+        selected_values = st_ant_tree(
+            treeData=build_sql_tree(files, fallback_database_key),
+            defaultValue=[current_value] if current_value else [],
+            allowClear=False,
+            multiple=False,
+            treeCheckable=False,
+            only_children_select=True,
+            showSearch=True,
+            treeLine=True,
+            placeholder="Velg SQL",
+            width_dropdown="100%",
+            max_height=520,
+            key="sql_file_tree",
+        )
+
+        if isinstance(selected_values, list) and selected_values:
+            return selected_sql_value_to_path(selected_values[-1])
+        if isinstance(selected_values, str):
+            return selected_sql_value_to_path(selected_values)
+
+        return None
+
+    options = [f"sql::{path.relative_to(SQL_DIR).as_posix()}" for path in files]
+    selected_index = options.index(current_value) if current_value in options else 0
+    selected_value = st.sidebar.selectbox(
+        "Velg SQL",
+        options=options,
+        index=selected_index,
+        format_func=lambda value: sql_file_display_title(
+            selected_sql_value_to_path(value) or files[0],
+            fallback_database_key,
+        ),
+        help="Installer st-ant-tree for trestruktur med sok.",
+        key="sql_file_tree_fallback",
+    )
+    return selected_sql_value_to_path(selected_value)
+
+
 # ---- Sidebar / trestruktur ----
 st.sidebar.title("SQL-filer")
 
@@ -802,52 +1055,11 @@ if not sql_files:
     st.warning(f"Fant ingen .sql-filer i: {SQL_DIR}")
     sql_files = []
 
-groups = {}
+with st.sidebar:
+    selected_file = render_sql_tree_selector(sql_files, DEFAULT_DATABASE_KEY)
 
-for f in sql_files:
-    rel = f.relative_to(SQL_DIR)
-    folder = str(rel.parent) if str(rel.parent) != "." else "Rot"
-    groups.setdefault(folder, []).append(f)
-
-selected_file = None
-
-for folder, files in groups.items():
-    with st.sidebar.expander(folder, expanded=(folder == "Rot")):
-        for f in files:
-            status = read_sql_status(str(f))
-            date_info = read_sql_file_date(str(f))
-            date_label = f"{date_info['date']} ({date_info['source']})"
-            button_label = f.name
-
-            if status["outdated"]:
-                reason = status["reason"] or "Denne SQL-en er markert som utdatert."
-                st.markdown(
-                    (
-                        "<div class='sql-outdated-label'>"
-                        f"<strong>UTDATERT</strong><br>{html.escape(f.name)}"
-                        f"<br><span>{html.escape(reason)}</span>"
-                        "</div>"
-                    ),
-                    unsafe_allow_html=True,
-                )
-                button_label = f"UTDATERT - {f.name}"
-
-            if st.button(
-                button_label,
-                key=str(f),
-                use_container_width=True,
-                help=(
-                    f"{date_label}. {status['reason']}"
-                    if status["outdated"] and status["reason"]
-                    else date_label
-                ),
-            ):
-                selected_file = f
-
-            st.markdown(
-                f"<div class='sql-file-date'>{html.escape(date_label)}</div>",
-                unsafe_allow_html=True,
-            )
+    if st_ant_tree is None:
+        st.caption("Tips: installer `st-ant-tree` for sokbar trestruktur.")
 
 if sql_files and "selected_sql_file" not in st.session_state:
     st.session_state.selected_sql_file = str(sql_files[0])
@@ -864,8 +1076,8 @@ if "selected_sql_file" in st.session_state:
 
 
 # ---- Hovedflate ----
-st.title("Migreringsdata fra Lydia / DWH")
-st.caption(f"Kilde: `{DB_PREFIX}`")
+st.title("DBMigration")
+st.caption(f"Standard database: `{database_label(DEFAULT_DATABASE_KEY)}`")
 
 with st.expander("📦 Samle alle SQL-filer til én tekstfil / ChatGPT-kilde", expanded=False):
     include_custom = st.checkbox(
@@ -921,6 +1133,7 @@ mode = st.radio(
 
 sql = ""
 base_name = "resultat"
+current_database_key = DEFAULT_DATABASE_KEY
 
 if mode == "Velg fra fil":
 
@@ -932,11 +1145,40 @@ if mode == "Velg fra fil":
     base_name = selected.stem
     selected_status = sql_status(sql)
     selected_date = sql_file_date(selected, sql)
+    selected_database_info = sql_database_info(sql, fallback=DEFAULT_DATABASE_KEY)
+    selected_database_key = selected_database_info["key"]
+    current_database_key = selected_database_key
 
     st.caption(f"SQL-fil: `{selected.relative_to(SQL_DIR)}`")
     st.caption(f"Dato: `{selected_date['date']}` ({selected_date['source']})")
+    st.caption(
+        f"Database: `{selected_database_info['label']}` ({selected_database_info['source']})"
+    )
 
     with st.container(border=True):
+        database_options = list(DATABASE_TARGETS.keys())
+        selected_database_key = st.selectbox(
+            "Database for denne SQL-filen",
+            options=database_options,
+            index=database_options.index(selected_database_key),
+            format_func=lambda key: DATABASE_TARGETS[key]["label"],
+            key=f"database_select_{rel_to_root(selected)}",
+        )
+        current_database_key = selected_database_key
+        if st.button(
+            "Lagre database i SQL-filen",
+            key=f"save_database_{rel_to_root(selected)}",
+            use_container_width=True,
+        ):
+            selected.write_text(
+                update_sql_database_marker(sql, selected_database_key),
+                encoding="utf-8",
+            )
+            read_sql_database_info.clear()
+            read_sql_file.clear()
+            st.success("Database er lagret i SQL-filen.")
+            st.rerun()
+
         mark_outdated = st.toggle(
             "Marker som utdatert",
             value=selected_status["outdated"],
@@ -1013,7 +1255,8 @@ if mode == "Velg fra fil":
 
 else:
 
-    default_sql = """
+    default_sql = f"""
+-- DATABASE: {DEFAULT_DATABASE_KEY}
 -- === SQL: Test ===
 SELECT TOP 100 *
 FROM INFORMATION_SCHEMA.TABLES;
@@ -1027,6 +1270,18 @@ FROM INFORMATION_SCHEMA.TABLES;
     )
 
     st.caption("Bruk separator: -- === SQL: Navn ===")
+
+    database_options = list(DATABASE_TARGETS.keys())
+    custom_database_info = sql_database_info(sql, fallback=DEFAULT_DATABASE_KEY)
+    custom_database_key = st.selectbox(
+        "Database for SQL-en",
+        options=database_options,
+        index=database_options.index(custom_database_info["key"]),
+        format_func=lambda key: DATABASE_TARGETS[key]["label"],
+        help="Brukes som fallback. Ved lagring skrives valget som -- DATABASE: ...",
+        key="custom_database_key",
+    )
+    current_database_key = custom_database_key
 
     save_name = st.text_input(
         "Filnavn ved lagring",
@@ -1050,7 +1305,8 @@ FROM INFORMATION_SCHEMA.TABLES;
         if st.button("Lagre SQL", use_container_width=True):
             safe_name = safe_sql_filename(save_name)
             target = CUSTOM_SQL_DIR / safe_name
-            target.write_text(sql, encoding="utf-8")
+            sql_to_save = update_sql_database_marker(sql, custom_database_key)
+            target.write_text(sql_to_save, encoding="utf-8")
             if commit_sql:
                 ok, output = git_commit_paths([target], commit_sql_message.strip() or f"Oppdater SQL: {safe_name}")
                 if ok:
@@ -1097,6 +1353,10 @@ if run_clicked or run_all_clicked:
             for path in sql_files:
                 file_sql = read_sql_file(str(path))
                 rel_path = path.relative_to(SQL_DIR)
+                file_database_key = sql_database_info(
+                    file_sql,
+                    fallback=DEFAULT_DATABASE_KEY,
+                )["key"]
 
                 sql_parts, active_prefix_blocks = split_multi_sql(
                     file_sql,
@@ -1105,22 +1365,34 @@ if run_clicked or run_all_clicked:
                 )
 
                 for title, one_sql in sql_parts:
+                    item_database_key = sql_database_info(
+                        one_sql,
+                        fallback=file_database_key,
+                    )["key"]
                     run_items.append(
                         {
                             "title": f"{rel_path} / {title}",
                             "sql": one_sql,
                             "source_file": str(rel_path),
+                            "database_key": item_database_key,
+                            "database_label": database_label(item_database_key),
                         }
                     )
 
             base_name = "alle_sql_filer"
         else:
             for title, one_sql in split_multi_sql(sql):
+                item_database_key = sql_database_info(
+                    one_sql,
+                    fallback=current_database_key,
+                )["key"]
                 run_items.append(
                     {
                         "title": title,
                         "sql": one_sql,
                         "source_file": str(selected.relative_to(SQL_DIR)) if selected else "egen_sql",
+                        "database_key": item_database_key,
+                        "database_label": database_label(item_database_key),
                     }
                 )
 
@@ -1152,9 +1424,9 @@ if run_clicked or run_all_clicked:
         with st.spinner(f"Kjører {len(safe_run_items)} SQL-spørring(er)..."):
             for item in safe_run_items:
                 try:
-                    df = run_sql(item["sql"], DB_PREFIX)
+                    df = run_sql(item["sql"], item["database_key"])
                 except Exception as sql_error:
-                    st.error(f"SQL feilet for: {item['title']}")
+                    st.error(f"SQL feilet for: {item['title']} ({item['database_label']})")
                     st.code(item["sql"], language="sql")
                     raise sql_error
 
@@ -1164,6 +1436,8 @@ if run_clicked or run_all_clicked:
                         "sql": item["sql"],
                         "df": df,
                         "source_file": item["source_file"],
+                        "database_key": item["database_key"],
+                        "database_label": item["database_label"],
                     }
                 )
         st.session_state.multi_results = results
@@ -1200,7 +1474,7 @@ if "multi_results" in st.session_state:
 
         if st.button("Lagre resultatanalyse", type="primary", use_container_width=True):
             try:
-                run_dir, files_written, manifest, comparison_text = archive_result_analysis(results, base_name, DB_PREFIX)
+                run_dir, files_written, manifest, comparison_text = archive_result_analysis(results, base_name, DEFAULT_DATABASE_KEY)
                 st.session_state.last_result_archive = {
                     "run_dir": str(run_dir),
                     "comparison_text": comparison_text,
@@ -1246,7 +1520,7 @@ if "multi_results" in st.session_state:
             c1, c2, c3 = st.columns(3)
             c1.metric("Rader", f"{len(df):,}")
             c2.metric("Kolonner", f"{len(df.columns):,}")
-            c3.metric("Kilde", DB_PREFIX)
+            c3.metric("Database", result.get("database_label", database_label(DEFAULT_DATABASE_KEY)))
 
             quality_df = column_quality_df(df)
             quality_paste_text = quality_df_to_paste_text(title, df)

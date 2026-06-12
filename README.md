@@ -1,14 +1,15 @@
-# Migreringsdata SQL
+# DBMigration
 
-Streamlit-app for aa kjoere, dokumentere og kvalitetssikre SQL-sporringer brukt i migreringsarbeid fra Lydia/DWH.
+Streamlit-app for aa kjoere, dokumentere og kvalitetssikre SQL-sporringer brukt i databasemigrering og datakvalitetsarbeid.
 
 Appen lar deg velge SQL-filer fra `SQL/`, skrive egne sporringer, kjoere ett eller flere SQL-resultater, eksportere data til CSV/Excel og lagre datakvalitetsanalyse i `Resultater/` uten aa versjonere selve uttrekksdataene.
 
 ## Hovedfunksjoner
 
-- Viser SQL-filer gruppert etter mappe i sidepanelet.
+- Viser SQL-filer i en sokbar trestruktur i sidepanelet.
 - Kan markere SQL-filer som utdaterte direkte fra UI-et.
 - Kan kjoere SQL fra fil eller fra fritekstfelt.
+- Kan knytte hver SQL til konkret database med `-- DATABASE: ...`.
 - Stotter flere SQL-resultater i samme fil med separator-kommentarer.
 - Kan kjoere alle SQL-filer samlet og lage samlet kolonnestatus.
 - Viser radtall, kolonnetall, resultatdata og datakvalitet per kolonne.
@@ -21,7 +22,7 @@ Appen lar deg velge SQL-filer fra `SQL/`, skrive egne sporringer, kjoere ett ell
 
 ```text
 Migration/
-+-- LydiaSQLDataOutput.py      # Streamlit-appen
++-- DBMigration.py            # Streamlit-appen
 +-- SQL/                       # SQL-filer som vises i appen
 |   +-- _egne_sporringer/      # SQL lagret fra "Skriv egen SQL"
 |   +-- avtaler/
@@ -34,7 +35,7 @@ Migration/
 
 ## Forutsetninger
 
-Appen forventer at den ligger i et repo hvor en overordnet mappe inneholder `DivClasses/`. Ved oppstart leter appen oppover fra `LydiaSQLDataOutput.py` etter denne mappen og importerer:
+Appen forventer at den ligger i et repo hvor en overordnet mappe inneholder `DivClasses/`. Ved oppstart leter appen oppover fra `DBMigration.py` etter denne mappen og importerer:
 
 ```python
 from DivClasses.SQLServerBase import SqlServerBaseCls
@@ -49,6 +50,13 @@ streamlit
 pandas
 plotly
 openpyxl
+st-ant-tree
+```
+
+Tree-select-komponenten installeres med:
+
+```powershell
+python -m pip install st-ant-tree
 ```
 
 ## Starte appen
@@ -56,23 +64,56 @@ openpyxl
 Fra denne mappen:
 
 ```powershell
-streamlit run LydiaSQLDataOutput.py
+streamlit run DBMigration.py
 ```
 
-Appen bruker bred layout og vises med tittelen `Migreringsdata SQL`.
+Appen bruker bred layout og vises med tittelen `DBMigration`.
 
-## Datakilde
+## Databaser
 
-I sidepanelet finnes valget `Bruk staging`.
+I sidepanelet finnes valget `Standard database`. Dette brukes bare som fallback naar en SQL ikke selv angir database.
 
-- Paa: appen bruker databaseprefix `PFTSQL_`.
-- Av: appen bruker databaseprefix `LYDIA_`.
+Stottede databaseverdier:
 
-Selve tilkoblingen haandteres av `SqlServerBaseCls`.
+- `PFTSQL`: SQL Server staging via `SqlServerBaseCls(prefix="PFTSQL_")`
+- `LYDIA`: SQL Server Lydia via `SqlServerBaseCls(prefix="LYDIA_")`
+- `IFS_ORACLE`: Oracle IFS via `OracleBaseCls(owner_default="IFSAPP")`
+
+Legg database i SQL-filen slik:
+
+```sql
+-- DATABASE: IFS_ORACLE
+```
+
+Appen kjenner ogsaa igjen aliaser som `IFS`, `IFSAPP`, `ORACLE`, `STAGING`, `PFTSQL_` og `LYDIA_`.
+
+For SQL Server haandteres tilkobling av `SqlServerBaseCls`. For IFS/Oracle haandteres tilkobling av `OracleBaseCls`, som forventer Oracle-konfig i env/secrets:
+
+```text
+ORACLE_DSN
+ORACLE_HOST
+ORACLE_PORT
+ORACLE_SERVICE_NAME
+ORACLE_USER
+ORACLE_PASSWORD
+```
+
+Det holder aa sette enten `ORACLE_DSN` eller kombinasjonen `ORACLE_HOST`, `ORACLE_PORT` og `ORACLE_SERVICE_NAME`, i tillegg til bruker/passord.
 
 ## Bruke SQL-filer
 
-Legg `.sql`-filer under `SQL/`. Appen finner filer rekursivt og grupperer dem etter undermappe.
+Legg `.sql`-filer under `SQL/`. Appen finner filer rekursivt og viser dem i en trestruktur i venstre sidepanel.
+
+Trevelgeren er bygget slik:
+
+```text
+mappe
++-- undermappe
+|   +-- sporring.sql
+|       +-- database
+```
+
+Det nederste nivaaet er databasen som SQL-en er knyttet til. Naar du velger database-bladet, velges SQL-filen i appen.
 
 SQL-filer sorteres etter dato. Dato hentes forst fra en SQL-kommentar:
 
@@ -81,6 +122,14 @@ SQL-filer sorteres etter dato. Dato hentes forst fra en SQL-kommentar:
 ```
 
 Hvis ingen dato-kommentar finnes, brukes filens sist endret-dato.
+
+Database hentes fra siste database-kommentar i SQL-en:
+
+```sql
+-- DATABASE: PFTSQL
+```
+
+Hvis kommentaren mangler, brukes standarddatabasen valgt i sidepanelet. I visningen for valgt SQL-fil kan databasevalget lagres tilbake til filen.
 
 ### Markere SQL som utdatert
 
@@ -104,14 +153,17 @@ Utdaterte filer vises tydelig i sidepanelet og i hovedvisningen.
 Appen kan splitte en SQL-fil i flere navngitte sporringer. Bruk separatorer paa egen linje:
 
 ```sql
+-- DATABASE: PFTSQL
+
 -- === SQL: Leverandorer ===
 SELECT ...
 
+-- DATABASE: IFS_ORACLE
 -- === SQL: Lokasjoner ===
 SELECT ...
 ```
 
-Hver blokk kjoeres som eget resultat og vises i egen fane.
+Hver blokk kjoeres som eget resultat og vises i egen fane. Hvis en blokk har egen `-- DATABASE:`-kommentar, overstyrer den filens database.
 
 ### Felles SQL-prefix
 
@@ -178,7 +230,8 @@ Resultater/alle_sql_filer_20260611_143000/
 `manifest.json` inneholder blant annet:
 
 - tidspunkt for kjoering
-- databaseprefix
+- standarddatabase
+- database per SQL-resultat
 - git-commit for repoet for arkivering
 - kildefil
 - SQL-hash
